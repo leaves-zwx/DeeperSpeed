@@ -144,6 +144,8 @@ BACKWARD_REDUCE_MICRO_TIMER = 'backward_allreduce_microstep'
 BACKWARD_REDUCE_GLOBAL_TIMER = 'backward_allreduce'
 STEP_MICRO_TIMER = 'step_microstep'
 STEP_GLOBAL_TIMER = 'step'
+BACKWARD_REDUCE_INDEPENDENT_P_G_MICRO_TIMER = 'backward_allreduce_reduce_independent_p_g_microstep'
+BACKWARD_REDUCE_P_G_EPILOGUE_MICRO_TIMER = 'backward_allreduce_p_g_epilogue_microstep'
 
 
 class EngineTimers(object):
@@ -170,6 +172,8 @@ class EngineTimers(object):
                 BACKWARD_REDUCE_MICRO_TIMER,
                 STEP_MICRO_TIMER
             ]
+            self.backward_reduce_idependent_p_g_timers += [BACKWARD_REDUCE_INDEPENDENT_P_G_MICRO_TIMER]
+            self.backward_reduce_p_g_epilogue_timers += [BACKWARD_REDUCE_P_G_EPILOGUE_MICRO_TIMER]
 
         if enable_global_timers:
             self.forward_timers += [FORWARD_GLOBAL_TIMER]
@@ -1918,8 +1922,33 @@ class DeepSpeedEngine(Module):
         # Communicate only at gradient accumulation boundaries
         elif self.is_gradient_accumulation_boundary():
             if self.zero_optimization_stage() == ZeroStageEnum.optimizer_states:
-                self.optimizer.reduce_gradients(
-                    pipeline_parallel=self.pipeline_parallelism)
+                # self.optimizer.reduce_gradients(
+                #     pipeline_parallel=self.pipeline_parallelism)
+                world_size = dist.get_world_size(self.optimizer.dp_process_group)
+                my_rank = dist.get_rank(self.optimizer.dp_process_group)
+
+                # with PP we must create ipg buffer, since backward is handled outside zero
+                if self.pipeline_parallel and self.optimizer.contiguous_gradients:
+                    self.optimizer.ipg_buffer = []
+                    buf_0 = torch.empty(int(self.optimizer.reduce_bucket_size),
+                                        dtype=self.optimizer.dtype,
+                                        device=get_accelerator().current_device_name())
+                    self.optimizer.ipg_buffer.append(buf_0)
+                    self.optimizer.ipg_index = 0
+
+
+                if not self.optimizer.overlap_comm:
+                    self._start_timers(self.engine_timers.backward_reduce_idependent_p_g_timers)
+                    for i, group in enumerate(self.optimizer.bit16_groups):
+                        for param in group:
+                            if param.grad is not None:
+                                self.reduce_ready_partitions_and_remove_grads(param, i)
+                    self._stop_timers(self.engine_timers.backward_reduce_idependent_p_g_timers)
+
+                self._start_timers(self.engine_timers.backward_reduce_p_g_epilogue_timers)
+                # reduce any pending grads in either hook/non-hook case
+                self.overlapping_partition_gradients_reduce_epilogue()
+                self._stop_timers(self.engine_timers.backward_reduce_p_g_epilogue_timers)
             else:
                 self.buffered_allreduce_fallback(elements_per_buffer=bucket_size)
 
