@@ -112,10 +112,13 @@ class SynchronizedWallClockTimer:
             get_accelerator().max_memory_cached() / (1024 * 1024 * 1024))
         return " | {} | {} | {} | {}".format(alloc, max_alloc, cache, max_cache)
 
-    def log(self, names, normalizer=1.0, reset=True, memory_breakdown=False, ranks=None):
+    def log(self, names, normalizer=1.0, reset=True, memory_breakdown=False, ranks=None, step=None, step_name=None):
         """Log a group of timers."""
         assert normalizer > 0.0
-        string = f"rank={dist.get_rank()} time (ms)"
+        step_string = ""
+        if step is not None:
+            step_string = f"{step_name or 'step'}={step} "
+        string = f"{step_string}time (ms)"
         for name in names:
             if name in self.timers:
                 elapsed_time = (self.timers[name].elapsed(reset=reset) / normalizer)

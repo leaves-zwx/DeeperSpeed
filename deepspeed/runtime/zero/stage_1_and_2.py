@@ -22,7 +22,7 @@ from deepspeed.runtime.utils import (bwc_tensor_model_parallel_rank,
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
-from deepspeed.utils import logger
+from deepspeed.utils import logger, log_dist
 from deepspeed.moe.utils import is_moe_param
 from deepspeed.git_version_info import version
 
@@ -236,9 +236,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             assert self.cpu_offload and type(self.optimizer) in [DeepSpeedCPUAdam], f"fp16_master_and_gradients requires optimizer to support keeping fp16 master and gradients while keeping the optimizer states in fp32. Currently only supported using ZeRO-Offload with DeepSpeedCPUAdam. But current setting is ZeRO-Offload:{self.cpu_offload} and optimizer type {type(self.optimizer)}. Either disable fp16_master_weights_and_gradients or enable ZeRO-2 Offload with DeepSpeedCPUAdam"
 
         if self.reduce_scatter:
-            assert self.communication_data_type in (torch.float16, torch.bfloat16), f"ZeRO-2 supports only float16 or bfloat16 communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
-            assert self.gradient_predivide_factor == 1.0, "gradient_predivide_factor != 1.0 is not yet supported with ZeRO-2 with reduce scatter enabled"
-            assert self.postscale_gradients, "pre-scale gradients is not yet supported with ZeRO-2 with reduce scatter enabled"
+            valid_reduce_scatter_dtypes = (torch.float16, torch.bfloat16, torch.float32)
+            assert self.communication_data_type in valid_reduce_scatter_dtypes, f"{self.zero_stage_string} supports {valid_reduce_scatter_dtypes} communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
+            assert self.gradient_predivide_factor == 1.0, "gradient_predivide_factor != 1.0 is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
+            assert self.postscale_gradients, "pre-scale gradients is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
+
+        log_dist(f'DeepSpeedZeroOptimizer communication_data_type = {communication_data_type}',
+                 ranks=[0])
 
         # param flattened by groups
         self.bit16_groups = []
@@ -276,6 +280,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.all_reduce_print = False
         self.dtype = self.optimizer.param_groups[0]['params'][0].dtype
+        log_dist(f'DeepSpeedZeroOptimizer dtype = {self.dtype}',
+                 ranks=[0])
 
         self.round_robin_bit16_groups = []
         self.round_robin_bit16_indices = []

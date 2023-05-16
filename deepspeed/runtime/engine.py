@@ -838,10 +838,12 @@ class DeepSpeedEngine(Module):
         res = self._config.communication_data_type
         if res is not None:
             return res
-        elif self.fp16_enabled() or self.zero_optimization_stage():
+
+        if self.fp16_enabled():
             return torch.float16
-        elif self.bfloat16_enabled():
-            return torch.bfloat16
+
+        # if self.bfloat16_enabled():
+        #     return torch.bfloat16
 
         return torch.float32
 
@@ -1196,6 +1198,8 @@ class DeepSpeedEngine(Module):
 
     def _do_optimizer_sanity_check(self, basic_optimizer):
         model_dtype, grad_accum_dtype = self.get_data_types()
+        log_dist(f"DeepSpeed optimizer_sanity_check, model_dtype = {model_dtype}, grad_accum_dtype = {grad_accum_dtype}",
+                 ranks=[0])
         zero_enabled = self.zero_optimization()
         amp_enabled = self.amp_enabled()
         # config based assertions
@@ -1291,6 +1295,8 @@ class DeepSpeedEngine(Module):
                  ranks=[0])
 
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
+        log_dist(f"DeepSpeed optimizer_wrapper = {optimizer_wrapper}",
+                 ranks=[0])
 
         if optimizer_wrapper == ZERO_OPTIMIZATION:
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
@@ -2229,10 +2235,12 @@ class DeepSpeedEngine(Module):
                 self.autotuning_end_profile_step() + 1):
             self._autotuning_exit()
 
-        if self.wall_clock_breakdown():
+        if self.wall_clock_breakdown() and self.gradient_accumulation_steps() > 1:
             # Log micro timing and reset
             self.timers.log(names=self.engine_timers.micro_timers,
-                            memory_breakdown=self.memory_breakdown())
+                            memory_breakdown=self.memory_breakdown(),
+                            # ranks=list(range(self.world_size)),
+                            step=self.micro_steps, step_name="microstep")
 
         if self.wall_clock_breakdown() or self.flops_profiler_enabled():
             # Log global timing and reset
@@ -2244,7 +2252,9 @@ class DeepSpeedEngine(Module):
                     fwd_time = self.timers(FORWARD_GLOBAL_TIMER).elapsed(reset=False)
                     self.print_forward_breakdown(fwd_time=fwd_time)
 
-                self.timers.log(self.engine_timers.global_timers)
+                self.timers.log(self.engine_timers.global_timers, 
+                                # ranks=list(range(self.world_size)),
+                                step=self.global_steps)
 
         self.micro_steps += 1
         see_memory_usage("Engine after step", force=self.memory_breakdown())
